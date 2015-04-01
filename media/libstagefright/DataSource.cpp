@@ -32,9 +32,7 @@
 #include "include/OggExtractor.h"
 #include "include/WAVExtractor.h"
 #include "include/WVMExtractor.h"
-#ifdef QCOM_HARDWARE
 #include "include/ExtendedExtractor.h"
-#endif
 
 #include "matroska/MatroskaExtractor.h"
 
@@ -45,25 +43,8 @@
 #include <utils/String8.h>
 
 #include <cutils/properties.h>
-#include <cutils/log.h>
-
-#include <dlfcn.h>
 
 namespace android {
-
-static void *loadExtractorPlugin() {
-    void *ret = NULL;
-    char lib[PROPERTY_VALUE_MAX];
-    if (property_get("media.stagefright.extractor-plugin", lib, "libFFmpegExtractor.so")) {
-        if (void *extractorLib = ::dlopen(lib, RTLD_LAZY)) {
-            ret = ::dlsym(extractorLib, "getExtractorPlugin");
-            ALOGW_IF(!ret, "Failed to find symbol, dlerror: %s", ::dlerror());
-        } else {
-            ALOGV("Failed to load %s, dlerror: %s", lib, ::dlerror());
-        }
-    }
-    return ret;
-}
 
 bool DataSource::getUInt16(off64_t offset, uint16_t *x) {
     *x = 0;
@@ -125,49 +106,22 @@ status_t DataSource::getSize(off64_t *size) {
 
 ////////////////////////////////////////////////////////////////////////////////
 
+Mutex DataSource::gSnifferMutex;
+List<DataSource::SnifferFunc> DataSource::gSniffers;
+
 bool DataSource::sniff(
         String8 *mimeType, float *confidence, sp<AMessage> *meta) {
-
-    return  mSniffer->sniff(this, mimeType, confidence, meta);
-}
-
-// static
-void DataSource::RegisterSniffer_l(SnifferFunc func) {
-    return;
-}
-
-// static
-void DataSource::RegisterDefaultSniffers() {
-    return;
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-Sniffer::Sniffer() {
-    registerDefaultSniffers();
-}
-
-bool Sniffer::sniff(
-        DataSource *source,String8 *mimeType, float *confidence, sp<AMessage> *meta) {
-
-    bool forceExtraSniffers = false;
-
-    if (*confidence == 3.14f) {
-       // Magic value, as set by MediaExtractor when a video container looks incomplete
-       forceExtraSniffers = true;
-    }
-
     *mimeType = "";
     *confidence = 0.0f;
     meta->clear();
 
-    Mutex::Autolock autoLock(mSnifferMutex);
-    for (List<SnifferFunc>::iterator it = mSniffers.begin();
-         it != mSniffers.end(); ++it) {
+    Mutex::Autolock autoLock(gSnifferMutex);
+    for (List<SnifferFunc>::iterator it = gSniffers.begin();
+         it != gSniffers.end(); ++it) {
         String8 newMimeType;
         float newConfidence;
         sp<AMessage> newMeta;
-        if ((*it)(source, &newMimeType, &newConfidence, &newMeta)) {
+        if ((*it)(this, &newMimeType, &newConfidence, &newMeta)) {
             if (newConfidence > *confidence) {
                 *mimeType = newMimeType;
                 *confidence = newConfidence;
@@ -176,81 +130,42 @@ bool Sniffer::sniff(
         }
     }
 
-    /* Only do the deeper sniffers if the results are null or in doubt */
-    if (mimeType->length() == 0 || *confidence < 0.2f || forceExtraSniffers) {
-        for (List<SnifferFunc>::iterator it = mExtraSniffers.begin();
-                it != mExtraSniffers.end(); ++it) {
-            String8 newMimeType;
-            float newConfidence;
-            sp<AMessage> newMeta;
-            if ((*it)(source, &newMimeType, &newConfidence, &newMeta)) {
-                if (newConfidence > *confidence) {
-                    *mimeType = newMimeType;
-                    *confidence = newConfidence;
-                    *meta = newMeta;
-                }
-            }
-        }
-    }
-
     return *confidence > 0.0;
 }
 
-void Sniffer::registerSniffer_l(SnifferFunc func) {
+// static
+void DataSource::RegisterSniffer(SnifferFunc func) {
+    Mutex::Autolock autoLock(gSnifferMutex);
 
-    for (List<SnifferFunc>::iterator it = mSniffers.begin();
-         it != mSniffers.end(); ++it) {
+    for (List<SnifferFunc>::iterator it = gSniffers.begin();
+         it != gSniffers.end(); ++it) {
         if (*it == func) {
             return;
         }
     }
 
-    mSniffers.push_back(func);
+    gSniffers.push_back(func);
 }
 
-void Sniffer::registerDefaultSniffers() {
-    Mutex::Autolock autoLock(mSnifferMutex);
-
-    registerSniffer_l(SniffMPEG4);
-    registerSniffer_l(SniffMatroska);
-    registerSniffer_l(SniffOgg);
-    registerSniffer_l(SniffWAV);
-    registerSniffer_l(SniffFLAC);
-    registerSniffer_l(SniffAMR);
-    registerSniffer_l(SniffMPEG2TS);
-    registerSniffer_l(SniffMP3);
-    registerSniffer_l(SniffAAC);
-    registerSniffer_l(SniffMPEG2PS);
-    registerSniffer_l(SniffWVM);
-#ifdef ENABLE_AV_ENHANCEMENTS
-    registerSniffer_l(ExtendedExtractor::Sniff);
-#endif
-    registerSnifferPlugin();
+// static
+void DataSource::RegisterDefaultSniffers() {
+    RegisterSniffer(SniffMPEG4);
+    RegisterSniffer(SniffMatroska);
+    RegisterSniffer(SniffOgg);
+    RegisterSniffer(SniffWAV);
+    RegisterSniffer(SniffFLAC);
+    RegisterSniffer(SniffAMR);
+    RegisterSniffer(SniffMPEG2TS);
+    RegisterSniffer(SniffMP3);
+    RegisterSniffer(SniffAAC);
+    RegisterSniffer(SniffMPEG2PS);
+    RegisterSniffer(SniffWVM);
+    RegisterSniffer(ExtendedExtractor::Sniff);
 
     char value[PROPERTY_VALUE_MAX];
     if (property_get("drm.service.enabled", value, NULL)
             && (!strcmp(value, "1") || !strcasecmp(value, "true"))) {
-        registerSniffer_l(SniffDRM);
-    }
-}
-
-void Sniffer::registerSnifferPlugin() {
-    static void (*getExtractorPlugin)(MediaExtractor::Plugin *) =
-            (void (*)(MediaExtractor::Plugin *))loadExtractorPlugin();
-
-    MediaExtractor::Plugin *plugin = MediaExtractor::getPlugin();
-    if (!plugin->sniff && getExtractorPlugin) {
-        getExtractorPlugin(plugin);
-    }
-    if (plugin->sniff) {
-        for (List<SnifferFunc>::iterator it = mExtraSniffers.begin();
-             it != mExtraSniffers.end(); ++it) {
-            if (*it == plugin->sniff) {
-                return;
-            }
-        }
-
-        mExtraSniffers.push_back(plugin->sniff);
+        RegisterSniffer(SniffDRM);
     }
 }
 
