@@ -34,6 +34,7 @@
 #include <media/stagefright/foundation/ABuffer.h>
 #include <media/stagefright/foundation/ADebug.h>
 #include <media/stagefright/foundation/AMessage.h>
+#include <media/stagefright/foundation/AUtils.h>
 #include <media/stagefright/MediaBuffer.h>
 #include <media/stagefright/MediaBufferGroup.h>
 #include <media/stagefright/MediaDefs.h>
@@ -221,8 +222,7 @@ status_t MPEG4DataSource::initCheck() const {
 ssize_t MPEG4DataSource::readAt(off64_t offset, void *data, size_t size) {
     Mutex::Autolock autoLock(mLock);
 
-    if (offset >= mCachedOffset
-            && offset + size <= mCachedOffset + mCachedSize) {
+    if (isInRange(mCachedOffset, mCachedSize, offset, size)) {
         memcpy(data, &mCache[offset - mCachedOffset], size);
         return size;
     }
@@ -1825,7 +1825,14 @@ status_t MPEG4Extractor::parseChunk(off64_t *offset, int depth) {
                 size = 0;
             }
 
+            if ((chunk_size > SIZE_MAX) || (SIZE_MAX - chunk_size <= size)) {
+                return ERROR_MALFORMED;
+            }
+
             uint8_t *buffer = new uint8_t[size + chunk_size];
+            if (buffer == NULL) {
+                return ERROR_MALFORMED;
+            }
 
             if (size > 0) {
                 memcpy(buffer, data, size);
@@ -1853,12 +1860,20 @@ status_t MPEG4Extractor::parseChunk(off64_t *offset, int depth) {
             if (mFileMetaData != NULL) {
                 ALOGV("chunk_data_size = %lld and data_offset = %lld",
                         chunk_data_size, data_offset);
+
+                if (chunk_data_size >= SIZE_MAX - 1) {
+                    return ERROR_MALFORMED;
+                }
                 sp<ABuffer> buffer = new ABuffer(chunk_data_size + 1);
                 if (mDataSource->readAt(
                     data_offset, buffer->data(), chunk_data_size) != (ssize_t)chunk_data_size) {
                     return ERROR_IO;
                 }
                 const int kSkipBytesOfDataBox = 16;
+                if (chunk_data_size <= kSkipBytesOfDataBox) {
+                    return ERROR_MALFORMED;
+                }
+
                 mFileMetaData->setData(
                     kKeyAlbumArt, MetaData::TYPE_NONE,
                     buffer->data() + kSkipBytesOfDataBox, chunk_data_size - kSkipBytesOfDataBox);
@@ -3406,12 +3421,12 @@ status_t MPEG4Source::read(
             size_t dstOffset = 0;
 
             while (srcOffset < size) {
-                bool isMalFormed = (srcOffset + mNALLengthSize > size);
+                bool isMalFormed = !isInRange(0u, size, srcOffset, mNALLengthSize);
                 size_t nalLength = 0;
                 if (!isMalFormed) {
                     nalLength = parseNALSize(&mSrcBuffer[srcOffset]);
                     srcOffset += mNALLengthSize;
-                    isMalFormed = srcOffset + nalLength > size;
+                    isMalFormed = !isInRange(0u, size, srcOffset, nalLength);
                 }
 
                 if (isMalFormed) {
@@ -3669,12 +3684,12 @@ status_t MPEG4Source::fragmentedRead(
             size_t dstOffset = 0;
 
             while (srcOffset < size) {
-                bool isMalFormed = (srcOffset + mNALLengthSize > size);
+                bool isMalFormed = !isInRange(0u, size, srcOffset, mNALLengthSize);
                 size_t nalLength = 0;
                 if (!isMalFormed) {
                     nalLength = parseNALSize(&mSrcBuffer[srcOffset]);
                     srcOffset += mNALLengthSize;
-                    isMalFormed = srcOffset + nalLength > size;
+                    isMalFormed = !isInRange(0u, size, srcOffset, nalLength);
                 }
 
                 if (isMalFormed) {
